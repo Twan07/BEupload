@@ -19,9 +19,9 @@ if (!fs.existsSync(uploadsDir)) {
 }
 
 const app = express();
-const PORT = process.env.PORT || 3001;
-const MONGODB_URI = process.env.MONGODB_URI || 'mongodb+srv://admin:Tuandzvcl@userupload.1zqgqci.mongodb.net/?appName=UserUpload';
-const JWT_SECRET = process.env.JWT_SECRET || 'TwanDZ';
+const PORT = process.env.PORT || 1509;
+const MONGODB_URI = process.env.MONGODB_URI || 'mongodb://localhost:27017';
+const JWT_SECRET = process.env.JWT_SECRET || 'your-secret-key-change-in-production';
 
 let db;
 let mongoClient;
@@ -49,6 +49,7 @@ async function initMongoDB() {
     if (!collectionNames.includes('users')) {
       await db.createCollection('users');
       await db.collection('users').createIndex({ email: 1 }, { unique: true });
+      await db.collection('users').createIndex({ username: 1 }, { unique: true, sparse: true });
       console.log('📦 Created users collection');
     }
     if (!collectionNames.includes('files')) {
@@ -98,7 +99,7 @@ const storage = multer.diskStorage({
 const upload = multer({
   storage,
   limits: {
-    fileSize: 0, // 0 = unlimited
+    fileSize: 5 * 1024 * 1024 * 1024, // 5GB limit (large enough for most use cases)
     files: 10 // Increased from 5 (now supports up to 10 concurrent uploads safely)
   },
   // Optimized streaming: 32KB chunks for better parallelism & faster throughput
@@ -127,25 +128,50 @@ function verifyToken(req, res, next) {
 // Sign up
 app.post('/auth/signup', async (req, res) => {
   try {
-    const { email, password, displayName } = req.body;
+    const { email, password, displayName, username } = req.body;
 
     if (!email || !password) {
       return res.status(400).json({ error: 'Email and password required' });
+    }
+
+    if (username && !/^[a-zA-Z0-9_]{3,20}$/.test(username)) {
+      return res.status(400).json({ error: 'Username must be 3-20 characters (letters, numbers, underscore only)' });
     }
 
     const usersCollection = db.collection('users');
     const existing = await usersCollection.findOne({ email });
 
     if (existing) {
-      return res.status(400).json({ error: 'User already exists' });
+      return res.status(400).json({ error: 'Email already exists' });
+    }
+
+    if (username) {
+      const existingUsername = await usersCollection.findOne({ username });
+      if (existingUsername) {
+        return res.status(400).json({ error: 'Username already taken' });
+      }
     }
 
     const hashedPassword = await bcryptjs.hash(password, 10);
     const user = {
       email,
       password: hashedPassword,
+      username: username || null,
       displayName: displayName || email.split('@')[0],
+      display_name: displayName || email.split('@')[0],
+      bio: '',
+      avatar_url: '',
+      location: '',
+      website: '',
+      phone: '',
+      social_media: {
+        twitter: '',
+        github: '',
+        linkedin: '',
+        instagram: ''
+      },
       created_at: new Date(),
+      updated_at: new Date(),
     };
 
     const result = await usersCollection.insertOne(user);
@@ -158,12 +184,18 @@ app.post('/auth/signup', async (req, res) => {
         id: userId,
         email,
         displayName: user.displayName,
+        username: user.username,
       },
       token,
     });
   } catch (err) {
     console.error('Signup error:', err);
-    res.status(500).json({ error: 'Signup failed' });
+    if (err.code === 11000) {
+      const field = Object.keys(err.keyPattern)[0];
+      res.status(400).json({ error: `${field} already exists` });
+    } else {
+      res.status(500).json({ error: 'Signup failed' });
+    }
   }
 });
 
@@ -196,6 +228,7 @@ app.post('/auth/signin', async (req, res) => {
         id: user._id.toString(),
         email: user.email,
         displayName: user.displayName,
+        username: user.username,
       },
       token,
     });
@@ -222,6 +255,15 @@ app.get('/auth/me', verifyToken, async (req, res) => {
       id: user._id.toString(),
       email: user.email,
       displayName: user.displayName,
+      username: user.username || '',
+      display_name: user.display_name || user.displayName,
+      bio: user.bio || '',
+      avatar_url: user.avatar_url || '',
+      location: user.location || '',
+      website: user.website || '',
+      phone: user.phone || '',
+      social_media: user.social_media || { twitter: '', github: '', linkedin: '', instagram: '' },
+      created_at: user.created_at,
       isAdmin: !!roleDoc,
     });
   } catch (err) {
@@ -272,10 +314,77 @@ app.post('/auth/change-password', verifyToken, async (req, res) => {
   }
 });
 
+// Update profile
+app.post('/auth/update-profile', verifyToken, async (req, res) => {
+  try {
+    const { display_name, bio, avatar_url, location, website, phone, social_media } = req.body;
+
+    const usersCollection = db.collection('users');
+    const updates = {};
+    
+    if (display_name !== undefined) updates.display_name = display_name;
+    if (bio !== undefined) updates.bio = bio;
+    if (avatar_url !== undefined) updates.avatar_url = avatar_url;
+    if (location !== undefined) updates.location = location;
+    if (website !== undefined) updates.website = website;
+    if (phone !== undefined) updates.phone = phone;
+    if (social_media !== undefined) updates.social_media = social_media;
+    updates.updated_at = new Date();
+
+    await usersCollection.updateOne(
+      { _id: new ObjectId(req.userId) },
+      { $set: updates }
+    );
+
+    // Return updated user
+    const user = await usersCollection.findOne({ _id: new ObjectId(req.userId) });
+    const roleDoc = await db.collection('user_roles').findOne({ user_id: req.userId, role: 'admin' });
+
+    res.json({
+      id: user._id.toString(),
+      email: user.email,
+      displayName: user.displayName,
+      username: user.username || '',
+      display_name: user.display_name || user.displayName,
+      bio: user.bio || '',
+      avatar_url: user.avatar_url || '',
+      location: user.location || '',
+      website: user.website || '',
+      phone: user.phone || '',
+      social_media: user.social_media || { twitter: '', github: '', linkedin: '', instagram: '' },
+      created_at: user.created_at,
+      isAdmin: !!roleDoc,
+      message: 'Profile updated successfully'
+    });
+  } catch (err) {
+    console.error('Update profile error:', err);
+    if (err.code === 11000) {
+      res.status(400).json({ error: 'Username already taken' });
+    } else {
+      res.status(500).json({ error: 'Failed to update profile' });
+    }
+  }
+});
+
 // File Routes
 
 // Upload file - Memory-efficient streaming
-app.post('/api/files/upload', verifyToken, upload.single('file'), async (req, res) => {
+app.post('/api/files/upload', verifyToken, (req, res, next) => {
+  upload.single('file')(req, res, (err) => {
+    // Handle multer errors
+    if (err) {
+      console.error('Multer error:', err.message);
+      if (err.code === 'LIMIT_FILE_SIZE') {
+        return res.status(413).json({ error: `File too large. Max size: ${err.limit} bytes` });
+      }
+      if (err.code === 'LIMIT_FILE_COUNT') {
+        return res.status(413).json({ error: 'Too many files' });
+      }
+      return res.status(400).json({ error: err.message || 'Upload failed' });
+    }
+    next();
+  });
+}, async (req, res) => {
   try {
     if (!req.file) {
       return res.status(400).json({ error: 'No file provided' });
