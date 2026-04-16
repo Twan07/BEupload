@@ -30,7 +30,7 @@ let mongoClient;
 
 // HF Transfer utility - High-performance Rust-based file operations
 // Uses `hf_transfer` CLI for ultra-fast parallel I/O operations
-const HF_TRANSFER_ENABLED = process.env.HF_TRANSFER_ENABLED !== 'false';
+const HF_TRANSFER_ENABLED = process.env.HF_TRANSFER_ENABLED !== 'true';
 
 // Check if hf_transfer is available
 async function checkHfTransferAvailable() {
